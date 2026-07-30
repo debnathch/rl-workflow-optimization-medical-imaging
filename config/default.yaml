@@ -1,0 +1,204 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Medical Imaging Digital Twin Workflow Optimizer — Default Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+simulation:
+  # Random seed for full reproducibility (dataset + simulation + RL training)
+  seed: 42
+
+  # Total simulation duration in minutes (480 = 8 hours, one shift)
+  duration_minutes: 480
+
+  # Warm-up period in minutes (statistics not collected during warm-up)
+  warmup_minutes: 60
+
+  # Time step for decision epochs (minutes) — how often the RL agent is queried
+  decision_epoch_minutes: 5
+
+  # Operating hours (24-hour clock)
+  operating_hours:
+    start: 6   # 06:00
+    end: 22    # 22:00
+
+  # Weekend throughput multiplier (relative to weekday)
+  weekend_multiplier: 0.6
+
+# ─────────────────────────────────────────────────────────────────────────────
+arrivals:
+  # Mean inter-arrival time (minutes) for routine patients
+  routine_mean_iat: 8.0
+
+  # Emergency patient arrival rate (fraction of total arrivals)
+  emergency_ratio: 0.08
+
+  # Urgent patient ratio (between routine and emergency)
+  urgent_ratio: 0.15
+
+  # Diurnal variation: scale factors per 4-hour block (00, 04, 08, 12, 16, 20)
+  diurnal_factors: [0.1, 0.15, 1.0, 0.9, 0.85, 0.6]
+
+# ─────────────────────────────────────────────────────────────────────────────
+modalities:
+  # Fraction of studies per modality (must sum to 1.0)
+  distribution:
+    CT: 0.45
+    MRI: 0.30
+    XRAY: 0.25
+
+  # Scan duration parameters (LogNormal: mean and sigma in minutes)
+  scan_duration:
+    CT:
+      mean: 25.0
+      sigma: 0.3
+    MRI:
+      mean: 45.0
+      sigma: 0.35
+    XRAY:
+      mean: 12.0
+      sigma: 0.25
+
+  # Number of scanners per modality
+  scanner_count:
+    CT: 3
+    MRI: 2
+    XRAY: 4
+
+  # Setup/prep time before scan (minutes, Normal distribution)
+  setup_time:
+    mean: 5.0
+    sigma: 1.5
+
+# ─────────────────────────────────────────────────────────────────────────────
+radiologists:
+  # Radiologist definitions: id, specialty, shift_start, shift_end, max_queue
+  roster:
+    - id: "RAD001"
+      specialty: "chest"
+      shift_start: 8
+      shift_end: 18
+      max_daily_reads: 60
+    - id: "RAD002"
+      specialty: "musculoskeletal"
+      shift_start: 8
+      shift_end: 17
+      max_daily_reads: 50
+    - id: "RAD003"
+      specialty: "neuroradiology"
+      shift_start: 9
+      shift_end: 19
+      max_daily_reads: 45
+    - id: "RAD004"
+      specialty: "abdominal"
+      shift_start: 7
+      shift_end: 17
+      max_daily_reads: 55
+    - id: "RAD005"
+      specialty: "emergency"
+      shift_start: 0
+      shift_end: 24
+      max_daily_reads: 80
+    - id: "RAD006"
+      specialty: "chest"
+      shift_start: 14
+      shift_end: 22
+      max_daily_reads: 55
+    - id: "RAD007"
+      specialty: "abdominal"
+      shift_start: 12
+      shift_end: 22
+      max_daily_reads: 55
+
+  # Mean reporting time per modality (minutes, LogNormal)
+  reporting_duration:
+    CT:
+      mean: 20.0
+      sigma: 0.4
+    MRI:
+      mean: 30.0
+      sigma: 0.45
+    XRAY:
+      mean: 8.0
+      sigma: 0.3
+
+  # Reporting time multiplier for emergency reads
+  emergency_priority_speedup: 0.6
+
+# ─────────────────────────────────────────────────────────────────────────────
+rl:
+  # PPO hyperparameters
+  ppo:
+    n_steps: 2048
+    batch_size: 64
+    n_epochs: 10
+    learning_rate: 3.0e-4
+    gamma: 0.99
+    gae_lambda: 0.95
+    clip_range: 0.2
+    ent_coef: 0.01
+    vf_coef: 0.5
+    max_grad_norm: 0.5
+
+  # Total training timesteps (use --fast flag for 10_000)
+  total_timesteps: 500_000
+
+  # Evaluation frequency (every N steps)
+  eval_freq: 10_000
+
+  # Number of eval episodes
+  n_eval_episodes: 5
+
+  # Reward shaping weights
+  reward_weights:
+    avg_wait_time: 1.0
+    emergency_tat: 3.0          # Higher penalty for emergency delays
+    scanner_utilization: 0.5    # Reward for high utilization (target 0.85)
+    utilization_target: 0.85
+    workload_imbalance: 0.8
+    throughput: 0.3
+
+# ─────────────────────────────────────────────────────────────────────────────
+dataset:
+  # Number of patient encounters to generate
+  n_patients: 100_000
+
+  # Time range for synthetic dataset
+  start_date: "2024-01-01"
+  end_date: "2024-12-31"
+
+  # Output directory (relative to project root)
+  output_dir: "outputs/dataset"
+
+  # Body part distributions per modality
+  body_parts:
+    CT:
+      - ["CHEST", 0.35]
+      - ["ABDOMEN", 0.30]
+      - ["HEAD", 0.20]
+      - ["PELVIS", 0.10]
+      - ["SPINE", 0.05]
+    MRI:
+      - ["BRAIN", 0.35]
+      - ["SPINE", 0.25]
+      - ["KNEE", 0.20]
+      - ["SHOULDER", 0.10]
+      - ["ABDOMEN", 0.10]
+    XRAY:
+      - ["CHEST", 0.50]
+      - ["EXTREMITY", 0.25]
+      - ["SPINE", 0.15]
+      - ["PELVIS", 0.10]
+
+# ─────────────────────────────────────────────────────────────────────────────
+analytics:
+  output_dir: "outputs/analytics"
+  figures_dir: "outputs/figures"
+  figure_dpi: 300
+  figure_format: "png"  # also saves PDF
+  color_palette: "Set2"
+
+# ─────────────────────────────────────────────────────────────────────────────
+dashboard:
+  refresh_interval_seconds: 2
+  max_history_points: 500
+  port: 8501
+  theme: "dark"
