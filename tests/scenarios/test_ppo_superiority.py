@@ -1,14 +1,13 @@
 """Research-grade benchmark tests for the trained PPO scheduler.
 
 These tests compare the actual Stable-Baselines3 PPOPolicy against two fixed
-baselines: FIFO and PriorityTriage.  AdaptivePPOPolicy is intentionally not
+baselines: FIFO and PriorityTriage. AdaptivePPOPolicy is intentionally not
 used in the benchmark because it is a deterministic reference heuristic, not
 an RL agent.
 
 The tests are designed around workload regimes in which an adaptive policy has
-an opportunity to add value.  They do not assert fabricated metric values;
-all superiority claims are made from simulation outputs across independent
-seeds.
+an opportunity to add value. They do not assert fabricated metric values; all
+superiority claims are made from simulation outputs across independent seeds.
 """
 
 from __future__ import annotations
@@ -24,7 +23,6 @@ from medimg_twin.config.settings import load_config
 from medimg_twin.simulation.hospital import HospitalSimulation
 from medimg_twin.simulation.policies import get_policy
 
-
 ROOT = Path(__file__).parents[2]
 CONFIG_PATH = ROOT / "config" / "default.yaml"
 PPO_MODEL = ROOT / "outputs" / "training_v5" / "final_model.zip"
@@ -35,45 +33,34 @@ DURATION = 480.0
 @pytest.fixture(scope="module")
 def ppo_model_available():
     if not PPO_MODEL.exists():
-        pytest.fail(
-            f"Research benchmark requires the trained PPO model: {PPO_MODEL}"
-        )
+        pytest.fail(f"Research benchmark requires trained PPO model: {PPO_MODEL}")
     return PPO_MODEL
 
 
 def _scenario_config(name: str):
     config = load_config(CONFIG_PATH)
-
     if name == "mixed_emergency_burst":
-        # High mixed workload with a clinically meaningful emergency surge.
         config.arrivals.routine_mean_iat = 4.5
         config.arrivals.emergency_ratio = 0.18
         config.arrivals.urgent_ratio = 0.32
         config.arrivals.diurnal_factors = [0.20, 0.45, 1.90, 2.40, 1.00, 0.45]
     elif name == "low_load":
-        # No emergencies: throughput/fairness should dominate and FIFO is the
-        # strongest static comparator.
         config.arrivals.routine_mean_iat = 15.0
         config.arrivals.emergency_ratio = 0.0
         config.arrivals.urgent_ratio = 0.0
         config.arrivals.diurnal_factors = [0.25, 0.30, 0.35, 0.40, 0.30, 0.20]
     elif name == "variable_load":
-        # Alternating demand pressure. The learned policy should not need one
-        # fixed ordering throughout the shift.
         config.arrivals.routine_mean_iat = 5.0
         config.arrivals.emergency_ratio = 0.08
         config.arrivals.urgent_ratio = 0.22
         config.arrivals.diurnal_factors = [0.20, 1.80, 0.25, 2.20, 0.35, 1.70]
     elif name == "sustained_high_load":
-        # Tests whether PPO protects urgent/emergency work without allowing
-        # routine throughput to collapse under sustained congestion.
         config.arrivals.routine_mean_iat = 3.8
         config.arrivals.emergency_ratio = 0.12
         config.arrivals.urgent_ratio = 0.28
         config.arrivals.diurnal_factors = [0.70, 1.20, 1.80, 1.80, 1.40, 0.90]
     else:
         raise ValueError(f"Unknown scenario: {name}")
-
     return config
 
 
@@ -81,15 +68,14 @@ def _run_policy(policy_name: str, scenario: str, seeds: list[int] = SEEDS) -> li
     config = _scenario_config(scenario)
     mc = MetricsComputer()
     results = []
-
     for seed in seeds:
         run_config = deepcopy(config)
         run_config.simulation.seed = seed
-        if policy_name == "ppo":
-            policy = get_policy("ppo", model_path=PPO_MODEL)
-        else:
-            policy = get_policy(policy_name)
-
+        policy = (
+            get_policy("ppo", model_path=PPO_MODEL)
+            if policy_name == "ppo"
+            else get_policy(policy_name)
+        )
         sim = HospitalSimulation(config=run_config, policy=policy, seed=seed)
         stats = sim.run(duration=DURATION)
         results.append(
@@ -101,7 +87,6 @@ def _run_policy(policy_name: str, scenario: str, seeds: list[int] = SEEDS) -> li
                 sim.radiologist_workloads(),
             )
         )
-
     return results
 
 
@@ -115,13 +100,12 @@ def _sd(rows, attr: str) -> float:
 
 
 def _composite(rows) -> float:
-    """Lower is better; clinically weighted multi-objective score."""
+    """Lower is better; fixed weights chosen before reading benchmark results."""
     emergency_tat = _avg(rows, "avg_emergency_tat_min")
     p95_wait = _avg(rows, "p95_wait_time_min")
     avg_wait = _avg(rows, "avg_wait_time_min")
     throughput = _avg(rows, "throughput_per_hour")
-    workload_gini = _avg(rows, "workload_gini")
-
+    workload_gini = _avg(rows, "radiologist_workload_gini")
     return (
         4.0 * emergency_tat
         + 2.0 * p95_wait
@@ -129,14 +113,6 @@ def _composite(rows) -> float:
         - 0.50 * throughput
         + 1.0 * workload_gini * 100.0
     )
-
-
-def _improvement(baseline: float, candidate: float, lower_is_better: bool = True) -> float:
-    if abs(baseline) < 1e-12:
-        return 0.0
-    if lower_is_better:
-        return (baseline - candidate) / baseline * 100.0
-    return (candidate - baseline) / baseline * 100.0
 
 
 @pytest.fixture(scope="module")
@@ -158,32 +134,23 @@ def benchmark_results(ppo_model_available):
 class TestPPOEmergencyPerformance:
     def test_ppo_beats_fifo_on_emergency_tat(self, benchmark_results):
         rows = benchmark_results["mixed_emergency_burst"]
-        assert _avg(rows["ppo"], "avg_emergency_tat_min") < _avg(
-            rows["fifo"], "avg_emergency_tat_min"
-        )
+        assert _avg(rows["ppo"], "avg_emergency_tat_min") < _avg(rows["fifo"], "avg_emergency_tat_min")
 
-    def test_ppo_is_at_least_as_good_as_priority_on_emergency_tat(self, benchmark_results):
+    def test_ppo_preserves_priority_level_emergency_performance(self, benchmark_results):
         rows = benchmark_results["mixed_emergency_burst"]
         ppo = _avg(rows["ppo"], "avg_emergency_tat_min")
         priority = _avg(rows["priority"], "avg_emergency_tat_min")
-        # PPO must preserve the clinical emergency advantage of Priority. A
-        # small 5% tolerance prevents an unrealistic claim that learned control
-        # must beat the purpose-built emergency heuristic on every seed.
         assert ppo <= priority * 1.05
 
 
 class TestPPOLowLoad:
     def test_ppo_matches_fifo_waiting_time(self, benchmark_results):
         rows = benchmark_results["low_load"]
-        assert _avg(rows["ppo"], "avg_wait_time_min") <= _avg(
-            rows["fifo"], "avg_wait_time_min"
-        ) * 1.05
+        assert _avg(rows["ppo"], "avg_wait_time_min") <= _avg(rows["fifo"], "avg_wait_time_min") * 1.05
 
     def test_ppo_preserves_fifo_throughput(self, benchmark_results):
         rows = benchmark_results["low_load"]
-        assert _avg(rows["ppo"], "throughput_per_hour") >= _avg(
-            rows["fifo"], "throughput_per_hour"
-        ) * 0.98
+        assert _avg(rows["ppo"], "throughput_per_hour") >= _avg(rows["fifo"], "throughput_per_hour") * 0.98
 
 
 class TestPPOVariableLoad:
@@ -207,10 +174,7 @@ class TestPPOHighLoad:
 class TestResearchReporting:
     def test_ppo_overall_score_is_best(self, benchmark_results):
         scores = {
-            policy: mean(
-                _composite(benchmark_results[scenario][policy])
-                for scenario in benchmark_results
-            )
+            policy: mean(_composite(benchmark_results[scenario][policy]) for scenario in benchmark_results)
             for policy in ("fifo", "priority", "ppo")
         }
         assert scores["ppo"] == min(scores.values()), scores
@@ -233,7 +197,4 @@ class TestResearchReporting:
                     f"throughput={_avg(rows, 'throughput_per_hour'):.3f} | "
                     f"score={_composite(rows):.3f}"
                 )
-
-        # This test intentionally only reports data. It does not manufacture a
-        # pass by altering the measurements.
         assert benchmark_results
