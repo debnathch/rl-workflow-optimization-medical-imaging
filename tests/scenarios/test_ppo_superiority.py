@@ -5,9 +5,9 @@ baselines: FIFO and PriorityTriage. AdaptivePPOPolicy is intentionally not
 used in the benchmark because it is a deterministic reference heuristic, not
 an RL agent.
 
-The tests are designed around workload regimes in which an adaptive policy has
-an opportunity to add value. They do not assert fabricated metric values; all
-superiority claims are made from simulation outputs across independent seeds.
+The benchmark uses four workload regimes and independent evaluation seeds.
+Superiority claims are computed from simulation outputs; no metric values are
+hard-coded into the assertions.
 """
 
 from __future__ import annotations
@@ -25,7 +25,9 @@ from medimg_twin.simulation.policies import get_policy
 
 ROOT = Path(__file__).parents[2]
 CONFIG_PATH = ROOT / "config" / "default.yaml"
-PPO_MODEL = ROOT / "outputs" / "training_v5" / "final_model.zip"
+# Single canonical research model path. Generated model artifacts remain local
+# and are ignored by git.
+PPO_MODEL = ROOT / "outputs" / "training_research_v6" / "final_model.zip"
 SEEDS = [42, 43, 44, 45, 46, 47, 48, 49, 50, 51]
 DURATION = 480.0
 
