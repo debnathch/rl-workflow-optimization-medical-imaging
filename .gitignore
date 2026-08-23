@@ -30,5 +30,8 @@ Thumbs.db
 .agents/
 .claude/
 
+# Generated experiment/training outputs
+outputs/
+
 # Misc
 *.numbers
