@@ -1,34 +1,24 @@
 """
-Scenario tests demonstrating AdaptivePPO outperforms static Priority triage.
+Scenario-level acceptance tests for PPO superiority.
 
-Scenario: "Urgent Overload" (Starvation Test)
-=============================================
-Config: starvation_test.yaml — 70% Urgent, 20% Routine, 10% Emergency arrivals.
+The purpose of these tests is NOT to make PPO look better by changing the
+assertions after observing a result.  Each scenario defines a workload where
+an adaptive policy should have a defensible advantage over a fixed heuristic.
 
-Under static Priority (Emergency=0, Urgent=1, Routine=2):
-  - A near-constant stream of Urgent patients means Routine patients wait
-    indefinitely (starvation). P95 routine wait climbs to 120+ minutes.
+Required PPO behaviours:
+1. Mixed load + emergency burst -> aggressive emergency-first scheduling.
+2. Low load + no emergencies -> fall back to FIFO-like throughput behaviour.
+3. Variable load -> change scheduling behaviour as workload pressure changes.
+4. Repeated load shifts -> outperform static Priority on the aggregate
+   multi-objective score rather than only on one cherry-picked KPI.
 
-Under AdaptivePPO:
-  - Anti-starvation: Routine patients waiting > 45 min get promoted past urgents.
-  - Longest-wait-first within each class (not FIFO within class like Priority).
-  - Emergency TAT is preserved (emergencies still first, served longest-wait first).
-
-Expected ordering:
-  Priority FAILS on routine fairness:   fifo_p95 > priority_p95  (NOT expected here)
-  AdaptivePPO wins on routine fairness: ppo_p95 < priority_p95
-  AdaptivePPO preserves emergency TAT:  ppo_emg_tat ≤ priority_emg_tat * 1.05
-  Priority still better than FIFO on emergency: fifo_emg_tat > priority_emg_tat
-
-Academic claim:
-  RL-based scheduling (AdaptivePPO) is a multi-objective optimizer.
-  Static Priority triage is a single-objective heuristic (emergency-first only).
-  In mixed-priority load scenarios, RL prevents routine starvation while
-  maintaining emergency performance — Priority cannot do both simultaneously.
+If a test fails, the policy/training behaviour should be fixed; the test should
+not be weakened simply to make the PPO result pass.
 """
 
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 from statistics import mean
 
@@ -39,26 +29,65 @@ from medimg_twin.config.settings import load_config
 from medimg_twin.simulation.hospital import HospitalSimulation
 from medimg_twin.simulation.policies import get_policy
 
-# ── Fixtures ─────────────────────────────────────────────────────────────────
 
-CONFIG_PATH = Path(__file__).parents[2] / "config" / "starvation_test.yaml"
-SEEDS = [42, 43, 44, 45, 46]   # 5 seeds for statistical robustness
-DURATION = 480.0               # 8-hour shift
+CONFIG_PATH = Path(__file__).parents[2] / "config" / "default.yaml"
+SEEDS = [42, 43, 44, 45, 46]
+DURATION = 480.0
 
 
-def _run_policy(policy_name: str, seeds: list[int] = SEEDS) -> list:
-    """Run a named policy for each seed and return list of PolicyMetrics."""
+def _scenario_config(name: str):
+    """Build deterministic workload variants from the validated base config."""
     config = load_config(CONFIG_PATH)
+
+    if name == "emergency_burst":
+        # Mixed load with a concentrated emergency burst during the middle
+        # of the shift.  PPO should react more aggressively than static
+        # Priority when emergency pressure rises.
+        config.arrivals.routine_mean_iat = 3.0
+        config.arrivals.emergency_ratio = 0.20
+        config.arrivals.urgent_ratio = 0.45
+        config.arrivals.diurnal_factors = [0.25, 0.50, 2.20, 1.80, 0.60, 0.30]
+    elif name == "low_load":
+        # No emergencies and low arrival pressure.  FIFO should be the
+        # natural baseline; PPO should learn to avoid unnecessary priority
+        # scheduling overhead and behave FIFO-like.
+        config.arrivals.routine_mean_iat = 15.0
+        config.arrivals.emergency_ratio = 0.0
+        config.arrivals.urgent_ratio = 0.05
+        config.arrivals.diurnal_factors = [0.25, 0.30, 0.35, 0.40, 0.30, 0.20]
+    elif name == "variable_load":
+        # Alternating low/high demand blocks.  Static Priority sees the same
+        # rules in every block; PPO should adapt its action to queue pressure.
+        config.arrivals.routine_mean_iat = 5.0
+        config.arrivals.emergency_ratio = 0.08
+        config.arrivals.urgent_ratio = 0.22
+        config.arrivals.diurnal_factors = [0.20, 1.80, 0.30, 2.00, 0.40, 1.60]
+    else:
+        raise ValueError(f"Unknown scenario: {name}")
+
+    return config
+
+
+def _run_policy(policy_name: str, scenario: str, seeds: list[int] = SEEDS) -> list:
+    """Run one policy over all seeds for one workload scenario."""
+    config = _scenario_config(scenario)
     mc = MetricsComputer()
     results = []
     for seed in seeds:
-        pol = get_policy(policy_name)
-        sim = HospitalSimulation(config=config, policy=pol, seed=seed)
+        # Avoid mutating the shared fixture/config between replications.
+        run_config = deepcopy(config)
+        run_config.simulation.seed = seed
+        policy = get_policy(policy_name)
+        sim = HospitalSimulation(config=run_config, policy=policy, seed=seed)
         stats = sim.run(duration=DURATION)
-        su = sim.scanner_utilizations()
-        rw = sim.radiologist_workloads()
-        m = mc.compute(policy_name, stats, DURATION, su, rw)
-        results.append(m)
+        metrics = mc.compute(
+            policy_name,
+            stats,
+            DURATION,
+            sim.scanner_utilizations(),
+            sim.radiologist_workloads(),
+        )
+        results.append(metrics)
     return results
 
 
@@ -66,164 +95,162 @@ def _avg(metrics_list, attr: str) -> float:
     return mean(getattr(m, attr) for m in metrics_list)
 
 
-# ── Shared fixtures (computed once per test session) ─────────────────────────
-
-@pytest.fixture(scope="module")
-def fifo_metrics():
-    return _run_policy("fifo")
-
-
-@pytest.fixture(scope="module")
-def priority_metrics():
-    return _run_policy("priority")
+def _normalised_improvement(baseline: float, candidate: float, lower_is_better: bool = True) -> float:
+    """Return relative improvement, guarding against zero denominators."""
+    if abs(baseline) < 1e-9:
+        return 0.0
+    if lower_is_better:
+        return (baseline - candidate) / baseline
+    return (candidate - baseline) / baseline
 
 
-@pytest.fixture(scope="module")
-def ppo_metrics():
-    return _run_policy("adaptive_ppo")
+def _multi_objective_score(metrics_list) -> float:
+    """Lower is better; combines the clinically important queue KPIs.
 
-
-# ── Test 1: FIFO baseline ─────────────────────────────────────────────────────
-
-class TestFIFOBaseline:
-    """FIFO is the worst policy — both Priority and PPO beat it."""
-
-    def test_fifo_emergency_tat_is_worst(self, fifo_metrics, priority_metrics):
-        """FIFO emergency TAT is significantly higher than Priority."""
-        fifo_emg = _avg(fifo_metrics, "avg_emergency_tat_min")
-        prio_emg = _avg(priority_metrics, "avg_emergency_tat_min")
-        assert fifo_emg > prio_emg, (
-            f"Expected FIFO emergency TAT ({fifo_emg:.1f}) > Priority ({prio_emg:.1f})"
-        )
-
-    def test_fifo_avg_wait_is_worst(self, fifo_metrics, priority_metrics):
-        """FIFO avg wait time is higher than Priority."""
-        fifo_w = _avg(fifo_metrics, "avg_wait_time_min")
-        prio_w = _avg(priority_metrics, "avg_wait_time_min")
-        assert fifo_w > prio_w, (
-            f"Expected FIFO avg wait ({fifo_w:.1f}) > Priority ({prio_w:.1f})"
-        )
-
-    def test_fifo_p95_wait_is_worst(self, fifo_metrics, ppo_metrics):
-        """FIFO P95 wait time is higher than AdaptivePPO."""
-        fifo_p95 = _avg(fifo_metrics, "p95_wait_time_min")
-        ppo_p95 = _avg(ppo_metrics, "p95_wait_time_min")
-        assert fifo_p95 > ppo_p95, (
-            f"Expected FIFO P95 wait ({fifo_p95:.1f}) > PPO ({ppo_p95:.1f})"
-        )
-
-
-# ── Test 2: PPO beats Priority on routine starvation ─────────────────────────
-
-class TestAdaptivePPOAntiStarvation:
-    """AdaptivePPO outperforms Priority on routine-patient metrics.
-
-    Under 70% urgent load, Priority starves routines. AdaptivePPO's
-    45-minute threshold prevents this.
+    Emergency TAT receives the largest weight because clinical urgency must
+    dominate.  P95 wait and average wait capture queue/fairness behaviour.
+    Throughput is rewarded as a small negative term.
     """
+    emergency_tat = _avg(metrics_list, "avg_emergency_tat_min")
+    p95_wait = _avg(metrics_list, "p95_wait_time_min")
+    avg_wait = _avg(metrics_list, "avg_wait_time_min")
+    throughput = _avg(metrics_list, "throughput_per_hour")
+    return (
+        3.0 * emergency_tat
+        + 1.5 * p95_wait
+        + 1.0 * avg_wait
+        - 0.30 * throughput
+    )
 
-    def test_ppo_p95_wait_lower_than_priority(self, priority_metrics, ppo_metrics):
-        """AdaptivePPO P95 wait < Priority P95 wait (anti-starvation working)."""
-        prio_p95 = _avg(priority_metrics, "p95_wait_time_min")
-        ppo_p95 = _avg(ppo_metrics, "p95_wait_time_min")
-        assert ppo_p95 < prio_p95, (
-            f"Expected PPO P95 wait ({ppo_p95:.1f} min) < Priority ({prio_p95:.1f} min). "
-            f"Anti-starvation did not produce measurable improvement."
+
+@pytest.fixture(scope="module")
+def emergency_burst_results():
+    return {
+        policy: _run_policy(policy, "emergency_burst")
+        for policy in ("fifo", "priority", "adaptive_ppo")
+    }
+
+
+@pytest.fixture(scope="module")
+def low_load_results():
+    return {
+        policy: _run_policy(policy, "low_load")
+        for policy in ("fifo", "priority", "adaptive_ppo")
+    }
+
+
+@pytest.fixture(scope="module")
+def variable_load_results():
+    return {
+        policy: _run_policy(policy, "variable_load")
+        for policy in ("fifo", "priority", "adaptive_ppo")
+    }
+
+
+class TestMixedLoadEmergencyBurst:
+    """PPO must exploit the emergency-first action during burst pressure."""
+
+    def test_ppo_emergency_tat_beats_priority(self, emergency_burst_results):
+        priority = _avg(emergency_burst_results["priority"], "avg_emergency_tat_min")
+        ppo = _avg(emergency_burst_results["adaptive_ppo"], "avg_emergency_tat_min")
+        assert ppo < priority, (
+            f"Emergency-burst requirement violated: PPO={ppo:.2f} min, "
+            f"Priority={priority:.2f} min. PPO must react more aggressively "
+            "when emergency arrivals burst."
         )
 
-    def test_ppo_avg_wait_lower_than_priority(self, priority_metrics, ppo_metrics):
-        """AdaptivePPO avg wait time ≤ Priority avg wait time."""
-        prio_avg = _avg(priority_metrics, "avg_wait_time_min")
-        ppo_avg = _avg(ppo_metrics, "avg_wait_time_min")
-        # Allow up to 5% tolerance — emergency TAT trade-off is acceptable
-        assert ppo_avg <= prio_avg * 1.05, (
-            f"Expected PPO avg wait ({ppo_avg:.1f}) ≤ Priority ({prio_avg:.1f}) × 1.05"
-        )
-
-    def test_ppo_better_fairness_gini(self, priority_metrics, ppo_metrics):
-        """AdaptivePPO radiologist workload Gini index ≤ Priority's (more equitable)."""
-        prio_gini = _avg(priority_metrics, "radiologist_workload_gini")
-        ppo_gini = _avg(ppo_metrics, "radiologist_workload_gini")
-        assert ppo_gini <= prio_gini * 1.10, (
-            f"Expected PPO Gini ({ppo_gini:.4f}) ≤ Priority ({prio_gini:.4f}) × 1.10"
-        )
-
-
-# ── Test 3: PPO does NOT degrade emergency performance ───────────────────────
-
-class TestAdaptivePPOEmergencyPreservation:
-    """PPO's anti-starvation must NOT come at the cost of emergency patients."""
-
-    def test_ppo_emergency_tat_not_worse_than_priority(self, priority_metrics, ppo_metrics):
-        """AdaptivePPO emergency TAT is within 10% of Priority's (never significantly worse)."""
-        prio_emg = _avg(priority_metrics, "avg_emergency_tat_min")
-        ppo_emg = _avg(ppo_metrics, "avg_emergency_tat_min")
-        assert ppo_emg <= prio_emg * 1.10, (
-            f"PPO emergency TAT ({ppo_emg:.1f} min) exceeded Priority ({prio_emg:.1f} min) "
-            f"by more than 10%. Anti-starvation is hurting emergency patients."
-        )
-
-    def test_ppo_p95_emergency_tat_preserved(self, priority_metrics, ppo_metrics):
-        """AdaptivePPO P95 emergency TAT is within 15% of Priority's."""
-        prio_p95e = _avg(priority_metrics, "p95_emergency_tat_min")
-        ppo_p95e = _avg(ppo_metrics, "p95_emergency_tat_min")
-        assert ppo_p95e <= prio_p95e * 1.15, (
-            f"PPO P95 emergency TAT ({ppo_p95e:.1f}) exceeded Priority ({prio_p95e:.1f}) "
-            f"by more than 15%."
-        )
-
-    def test_ppo_emergency_tat_much_better_than_fifo(self, fifo_metrics, ppo_metrics):
-        """AdaptivePPO emergency TAT is significantly better than FIFO (>15% improvement)."""
-        fifo_emg = _avg(fifo_metrics, "avg_emergency_tat_min")
-        ppo_emg = _avg(ppo_metrics, "avg_emergency_tat_min")
-        improvement_pct = (fifo_emg - ppo_emg) / fifo_emg * 100
-        assert ppo_emg < fifo_emg * 0.90, (
-            f"Expected PPO to beat FIFO emergency TAT by >10%. "
-            f"FIFO={fifo_emg:.1f}, PPO={ppo_emg:.1f}, improvement={improvement_pct:.1f}%"
+    def test_ppo_emergency_tat_beats_fifo(self, emergency_burst_results):
+        fifo = _avg(emergency_burst_results["fifo"], "avg_emergency_tat_min")
+        ppo = _avg(emergency_burst_results["adaptive_ppo"], "avg_emergency_tat_min")
+        assert ppo < fifo, (
+            f"PPO emergency TAT ({ppo:.2f}) must beat FIFO ({fifo:.2f}) "
+            "during an emergency burst."
         )
 
 
-# ── Test 4: Policy ordering guarantee ────────────────────────────────────────
+class TestLowLoadNoEmergencies:
+    """PPO should exploit FIFO-like behaviour when priority pressure is absent."""
 
-class TestPolicyOrderingGuarantees:
-    """End-to-end ordering: FIFO worst → Priority middle → PPO best on key metrics."""
-
-    def test_three_policy_p95_ordering(self, fifo_metrics, priority_metrics, ppo_metrics):
-        """P95 wait time ordering: FIFO > Priority > PPO (PPO is best)."""
-        fifo_p95 = _avg(fifo_metrics, "p95_wait_time_min")
-        prio_p95 = _avg(priority_metrics, "p95_wait_time_min")
-        ppo_p95 = _avg(ppo_metrics, "p95_wait_time_min")
-        assert fifo_p95 > prio_p95, (
-            f"Priority ({prio_p95:.1f}) should beat FIFO ({fifo_p95:.1f}) on P95 wait"
-        )
-        assert ppo_p95 < prio_p95, (
-            f"PPO ({ppo_p95:.1f}) should beat Priority ({prio_p95:.1f}) on P95 wait "
-            f"(anti-starvation effect under 70% urgent load)"
+    def test_ppo_matches_or_beats_fifo_wait(self, low_load_results):
+        fifo = _avg(low_load_results["fifo"], "avg_wait_time_min")
+        ppo = _avg(low_load_results["adaptive_ppo"], "avg_wait_time_min")
+        assert ppo <= fifo, (
+            f"Low-load requirement violated: PPO avg wait={ppo:.2f}, "
+            f"FIFO={fifo:.2f}. With no emergencies, PPO should fall back "
+            "toward FIFO behaviour rather than imposing priority ordering."
         )
 
-    def test_emergency_tat_ordering_fifo_worst(
-        self, fifo_metrics, priority_metrics, ppo_metrics
-    ):
-        """Emergency TAT ordering: FIFO worst, Priority and PPO both better."""
-        fifo_emg = _avg(fifo_metrics, "avg_emergency_tat_min")
-        prio_emg = _avg(priority_metrics, "avg_emergency_tat_min")
-        ppo_emg = _avg(ppo_metrics, "avg_emergency_tat_min")
-        assert fifo_emg > prio_emg, (
-            f"Priority ({prio_emg:.1f}) must beat FIFO ({fifo_emg:.1f}) on emergency TAT"
-        )
-        assert fifo_emg > ppo_emg, (
-            f"PPO ({ppo_emg:.1f}) must beat FIFO ({fifo_emg:.1f}) on emergency TAT"
+    def test_ppo_throughput_not_below_fifo(self, low_load_results):
+        fifo = _avg(low_load_results["fifo"], "throughput_per_hour")
+        ppo = _avg(low_load_results["adaptive_ppo"], "throughput_per_hour")
+        assert ppo >= fifo * 0.99, (
+            f"PPO throughput={ppo:.2f}/h fell below FIFO={fifo:.2f}/h "
+            "in the low-load/no-emergency scenario."
         )
 
-    def test_throughput_comparable(self, fifo_metrics, priority_metrics, ppo_metrics):
-        """All three policies have similar throughput (scheduling order doesn't change capacity)."""
-        fifo_tp = _avg(fifo_metrics, "throughput_per_hour")
-        prio_tp = _avg(priority_metrics, "throughput_per_hour")
-        ppo_tp = _avg(ppo_metrics, "throughput_per_hour")
-        # Within 15% of each other (throughput is capacity-bound, not policy-bound)
-        max_tp = max(fifo_tp, prio_tp, ppo_tp)
-        min_tp = min(fifo_tp, prio_tp, ppo_tp)
-        assert (max_tp - min_tp) / max_tp < 0.15, (
-            f"Throughput spread too large: FIFO={fifo_tp:.2f}, "
-            f"Priority={prio_tp:.2f}, PPO={ppo_tp:.2f}"
+
+class TestVariableLoadAdaptation:
+    """PPO must improve the aggregate objective under changing demand."""
+
+    def test_ppo_beats_static_priority(self, variable_load_results):
+        priority_score = _multi_objective_score(variable_load_results["priority"])
+        ppo_score = _multi_objective_score(variable_load_results["adaptive_ppo"])
+        assert ppo_score < priority_score, (
+            f"Variable-load requirement violated: PPO score={ppo_score:.2f}, "
+            f"Priority score={priority_score:.2f}. PPO should adapt to changing "
+            "queue pressure instead of applying one fixed rule."
+        )
+
+    def test_ppo_beats_both_static_baselines(self, variable_load_results):
+        fifo_score = _multi_objective_score(variable_load_results["fifo"])
+        priority_score = _multi_objective_score(variable_load_results["priority"])
+        ppo_score = _multi_objective_score(variable_load_results["adaptive_ppo"])
+        assert ppo_score < fifo_score and ppo_score < priority_score, (
+            "PPO must be the best policy on the aggregate variable-load "
+            f"objective: FIFO={fifo_score:.2f}, Priority={priority_score:.2f}, "
+            f"PPO={ppo_score:.2f}."
+        )
+
+
+class TestRepeatedLoadShifts:
+    """Four independent shifts protect against a single favourable seed."""
+
+    @pytest.mark.parametrize(
+        "scenario",
+        ["emergency_burst", "low_load", "variable_load"],
+    )
+    def test_ppo_is_not_worse_on_composite_objective(self, scenario):
+        fifo = _run_policy("fifo", scenario)
+        priority = _run_policy("priority", scenario)
+        ppo = _run_policy("adaptive_ppo", scenario)
+
+        fifo_score = _multi_objective_score(fifo)
+        priority_score = _multi_objective_score(priority)
+        ppo_score = _multi_objective_score(ppo)
+        best_static = min(fifo_score, priority_score)
+
+        # PPO must beat the better static baseline, not merely the worse one.
+        assert ppo_score < best_static, (
+            f"PPO is not best in {scenario}: FIFO={fifo_score:.2f}, "
+            f"Priority={priority_score:.2f}, PPO={ppo_score:.2f}"
+        )
+
+
+class TestPPOClaimGuardrails:
+    """Prevent tests from silently accepting a weaker PPO result."""
+
+    def test_emergency_improvement_is_measurable(self, emergency_burst_results):
+        priority = _avg(emergency_burst_results["priority"], "avg_emergency_tat_min")
+        ppo = _avg(emergency_burst_results["adaptive_ppo"], "avg_emergency_tat_min")
+        improvement = _normalised_improvement(priority, ppo)
+        assert improvement > 0.0, (
+            f"PPO emergency improvement must be positive; observed {improvement:.2%}."
+        )
+
+    def test_variable_load_p95_wait_improves(self, variable_load_results):
+        priority = _avg(variable_load_results["priority"], "p95_wait_time_min")
+        ppo = _avg(variable_load_results["adaptive_ppo"], "p95_wait_time_min")
+        assert ppo < priority, (
+            f"PPO P95 wait={ppo:.2f} must be below Priority={priority:.2f} "
+            "under variable load."
         )
