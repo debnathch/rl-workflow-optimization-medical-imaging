@@ -81,8 +81,14 @@ def main(
     # Determine policies to run
     if policy == "all":
         policies_to_run = ["fifo", "priority"]
+        default_model = Path("outputs/training_full/best_model/best_model.zip")
+        if not model_path and default_model.exists():
+            model_path = default_model
+        
         if model_path:
             policies_to_run.append("ppo")
+        else:
+            console.print("[yellow]Skipping PPO policy because no model_path was provided and default model was not found.[/yellow]")
     else:
         policies_to_run = [policy]
 
@@ -115,7 +121,7 @@ def main(
             else:
                 pol = get_policy(p_name)
 
-            sim = HospitalSimulation(config=config, seed=current_seed)
+            sim = HospitalSimulation(config=config, policy=pol, seed=current_seed)
             stats = sim.run(duration=duration)
 
             scanner_utils = sim.scanner_utilizations()

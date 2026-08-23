@@ -1,0 +1,45 @@
+graph TD
+    subgraph REWARD["🎯 Reward = Σ weighted KPIs"]
+        R["reward(t)"]
+
+        subgraph NEGATIVE["Penalties (negative)"]
+            W["− α · avg_wait_time\nα = 1.0\nReduces patient wait"]
+            E["− β · emergency_TAT\nβ = 3.0\nStrongest penalty"]
+            I["− δ · workload_imbalance\nδ = 0.8\nGini coefficient of radiologist loads"]
+        end
+
+        subgraph POSITIVE["Incentives (positive)"]
+            U["+ γ · |utilization − target|\nγ = 0.5, target = 0.85\nRewards scanner efficiency"]
+            TP["+ ε · throughput_per_hour\nε = 0.3\nRewards completing patients"]
+        end
+    end
+
+    R --> W
+    R --> E
+    R --> I
+    R --> U
+    R --> TP
+
+    subgraph OBS["📡 Observation Vector (21 features)"]
+        O1["[0]   CT queue length / 50"]
+        O2["[1]   MRI queue length / 50"]
+        O3["[2]   XRAY queue length / 50"]
+        O4["[3]   Emergency queue length / 50"]
+        O5["[4]   CT scanner utilization"]
+        O6["[5]   MRI scanner utilization"]
+        O7["[6]   XRAY scanner utilization"]
+        O8["[7–13] 7 radiologist workload scores"]
+        O9["[14]  Hour of day (0–1)"]
+        O10["[15]  Day of week (0–1)"]
+        O11["[16]  Routine patient count"]
+        O12["[17]  Urgent patient count"]
+        O13["[18]  Emergency patient count"]
+        O14["[19]  Patients completed last epoch"]
+        O15["[20]  Avg wait time last epoch / 300"]
+    end
+
+    subgraph ACT["🕹️ Action Space — Discrete(3)"]
+        A0["0 → FIFO\nQueue order by arrival time"]
+        A1["1 → Priority Triage\nEmergency > Urgent > Routine"]
+        A2["2 → Emergency First\nMax priority to EMERGENCY queue"]
+    end

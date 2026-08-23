@@ -1,0 +1,39 @@
+flowchart LR
+    subgraph CONFIG["⚙️ Config"]
+        C1["n_patients: 100,000\nstart: 2024-01-01\nend: 2024-12-31\nseed: 42"]
+    end
+
+    subgraph GEN["🏭 SyntheticDataGenerator"]
+        AT["_generate_arrival_times()\nPoisson Process\nTotal span: 525,600 min"]
+        ENC["_generate_encounters()\n100k iterations"]
+        DF["_to_dataframes()\nPandas conversion"]
+    end
+
+    subgraph PER_PT["Per-Patient Generation"]
+        P1["Sample Priority\nEMG 8% · URG 15% · ROUTINE 77%"]
+        P2["Sample Modality\nCT 45% · MRI 30% · XRAY 25%"]
+        P3["Sample Body Part\nWeighted per modality"]
+        P4["Sample Timestamps\nLognormal durations"]
+        P5["Create Patient\nDataclass with all fields"]
+        P6["DICOM Study\nDICOMMetadataGenerator"]
+        P7["5 HL7 Messages\nHL7EventGenerator"]
+    end
+
+    subgraph OUT["📁 outputs/dataset/"]
+        O1["patients.parquet\n15.6 MB\n100k rows × 35 cols"]
+        O2["hl7_messages.parquet\n52.8 MB\n500k rows\nADT·ORM·SIU·ORU·ADT"]
+        O3["dicom_studies.parquet\n16.1 MB\n100k rows\nUID·params·metadata"]
+        O4["metadata.json\nSeed · timestamp · config"]
+    end
+
+    CONFIG --> GEN
+    AT --> ENC
+    ENC --> P1 --> P2 --> P3 --> P4 --> P5
+    P5 --> P6
+    P5 --> P7
+    P6 --> DF
+    P7 --> DF
+    DF --> O1
+    DF --> O2
+    DF --> O3
+    DF --> O4

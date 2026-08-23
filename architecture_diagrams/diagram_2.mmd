@@ -1,0 +1,39 @@
+flowchart TD
+    A([👤 Patient Arrives\nPoisson Process]) --> B{Operating Hours?\n06:00–22:00}
+    B -- No --> SKIP([Patient Skipped\nOutside Hours])
+    B -- Yes --> C[Determine Priority\nEMERGENCY / URGENT / ROUTINE]
+
+    C --> D[Assign Modality\nCT 45% · MRI 30% · XRAY 25%]
+    D --> E[Sample Body Part\nChest · Brain · Knee ...]
+
+    E --> F["HL7: ADT^A01\nPatient Admission"]
+    F --> G[Registration\n~2 min delay]
+
+    G --> H["HL7: ORM^O01\nImaging Order"]
+    H --> I[Join Modality Queue\nPriorityResource]
+
+    I --> J{Scanner\nAvailable?}
+    J -- No --> WAIT[⏳ Wait in Queue\nLognormal distribution]
+    WAIT --> J
+    J -- Yes --> K["HL7: SIU^S12\nSchedule Appointment"]
+
+    K --> L[Setup & Prep\n~5 min Normal]
+    L --> M["🔬 Scan in Progress\nCT: 25 min · MRI: 45 min\nXRAY: 12 min"]
+    M --> N["Generate DICOM Study\nUID · Params · Metadata"]
+
+    N --> O[Join Report Queue\nRadiologist Assignment]
+    O --> P{Radiologist\nAvailable?\nSpecialty Match}
+    P -- No --> RWAIT[⏳ Report Wait\n~10 min Exponential]
+    RWAIT --> P
+    P -- Yes --> Q["📝 Radiologist Reports\nCT: 20 min · MRI: 30 min\nXRAY: 8 min"]
+
+    Q --> R["HL7: ORU^R01\nReport Transmitted"]
+    R --> S[Patient Discharge\n~5 min]
+    S --> T["HL7: ADT^A03\nDischarge Event"]
+    T --> U([✅ Encounter Complete\nMetrics Recorded])
+
+    style A fill:#4CAF50,color:#fff
+    style U fill:#2196F3,color:#fff
+    style SKIP fill:#FF5722,color:#fff
+    style M fill:#9C27B0,color:#fff
+    style Q fill:#FF9800,color:#fff

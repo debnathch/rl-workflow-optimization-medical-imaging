@@ -1,0 +1,35 @@
+gantt
+    title Patient Encounter Timeline (Approximate Durations)
+    dateFormat  mm
+    axisFormat  %M min
+
+    section Patient Arrives
+    Arrival event          :milestone, 00, 0min
+
+    section Registration
+    HL7 ADT-A01 sent       :milestone, 00, 0min
+    Registration delay     :reg, 00, 2min
+
+    section Ordering
+    HL7 ORM-O01 sent       :milestone, 02, 0min
+    Order processing       :ord, 02, 3min
+
+    section Queue Wait
+    HL7 SIU-S12 sent       :milestone, 05, 0min
+    Waiting for scanner    :crit, wait, 05, 45min
+
+    section Scan
+    Setup / prep           :setup, 50, 5min
+    CT Scan in progress    :active, scan, 55, 25min
+
+    section DICOM Generation
+    Study metadata created :milestone, 80, 0min
+
+    section Reporting
+    Report queue wait      :rwait, 80, 10min
+    Radiologist reporting  :active, report, 90, 20min
+
+    section Discharge
+    HL7 ORU-R01 sent       :milestone, 110, 0min
+    Discharge processing   :disc, 110, 5min
+    HL7 ADT-A03 sent       :milestone, 115, 0min

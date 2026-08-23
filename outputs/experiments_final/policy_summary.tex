@@ -1,0 +1,10 @@
+\begin{tabular}{lrrrrrrrrrrrrrrrrrrr}
+\toprule
+ & n_patients_completed & throughput_per_hour & avg_wait_time_min & std_wait_time_min & p50_wait_time_min & p95_wait_time_min & p99_wait_time_min & avg_emergency_tat_min & p95_emergency_tat_min & avg_total_tat_min & ct_utilization & mri_utilization & xray_utilization & avg_scanner_utilization & radiologist_workload_std & radiologist_workload_gini & avg_queue_length & max_queue_length & sim_duration_min \\
+policy_name &  &  &  &  &  &  &  &  &  &  &  &  &  &  &  &  &  &  &  \\
+\midrule
+fifo & 106 & 13.281250 & 57.443157 & 60.830002 & 29.389479 & 190.154101 & 226.338370 & 103.217331 & 226.502088 & 103.440000 & 0.416453 & 0.461485 & 0.219290 & 0.338832 & 1.336057 & 0.047457 & 13.138158 & 29.625000 & 480.000000 \\
+priority & 104 & 13.078125 & 39.412794 & 47.177107 & 23.649272 & 135.255034 & 232.471385 & 78.089167 & 139.324637 & 83.745384 & 0.414519 & 0.455426 & 0.219181 & 0.336792 & 1.115198 & 0.037598 & 12.509211 & 29.250000 & 480.000000 \\
+ppo & 104 & 13.078125 & 39.539499 & 47.229310 & 23.664219 & 135.255034 & 232.471385 & 78.089167 & 139.324637 & 83.872089 & 0.414519 & 0.455426 & 0.219181 & 0.336792 & 1.115198 & 0.037598 & 12.509211 & 29.250000 & 480.000000 \\
+\bottomrule
+\end{tabular}

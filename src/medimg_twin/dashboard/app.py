@@ -15,7 +15,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -28,6 +28,12 @@ from medimg_twin.config.settings import load_config
 from medimg_twin.simulation.entities import Modality, PatientStatus, Priority
 from medimg_twin.simulation.hospital import HospitalSimulation
 from medimg_twin.simulation.policies import get_policy
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    force=True
+)
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +165,14 @@ def get_or_create_sim(policy_name: str = "fifo") -> HospitalSimulation:
     """Get existing simulation or create a new one."""
     if st.session_state.sim is None or st.session_state.policy_name != policy_name:
         cfg = st.session_state.config or load_config()
-        policy = get_policy(policy_name)
+        if policy_name == "ppo":
+            model_path = Path("outputs/training_full/best_model/best_model.zip")
+            if not model_path.exists():
+                st.error(f"PPO model not found at {model_path}. Please train the model first.")
+                st.stop()
+            policy = get_policy(policy_name, model_path=model_path)
+        else:
+            policy = get_policy(policy_name)
         sim = HospitalSimulation(config=cfg, policy=policy, seed=42)
         sim.reset()
         sim_duration = cfg.simulation.duration_minutes
@@ -171,7 +184,7 @@ def get_or_create_sim(policy_name: str = "fifo") -> HospitalSimulation:
         st.session_state.sim_step = 0
         st.session_state.history = {k: [] for k in st.session_state.history}
         st.session_state.completed_patients = []
-    return st.session_state.sim
+    return cast(HospitalSimulation, st.session_state.sim)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -185,7 +198,7 @@ def render_sidebar() -> dict[str, Any]:
         
         policy = st.selectbox(
             "Scheduling Policy",
-            ["fifo", "priority"],
+            ["fifo", "priority", "ppo"],
             index=0,
             help="Choose the scheduling policy for the simulation",
         )
@@ -345,7 +358,7 @@ def render_live_simulation(settings: dict[str, Any]) -> None:
                 margin=dict(l=0, r=0, t=10, b=0),
                 legend=dict(orientation="h", y=1.02),
             )
-            st.plotly_chart(fig_queue, use_container_width=True)
+            st.plotly_chart(fig_queue, width="stretch")
         else:
             st.info("Start simulation to see queue data")
     
@@ -389,7 +402,7 @@ def render_live_simulation(settings: dict[str, Any]) -> None:
                 xaxis_title="Time (min)",
                 margin=dict(l=0, r=0, t=10, b=0),
             )
-            st.plotly_chart(fig_util, use_container_width=True)
+            st.plotly_chart(fig_util, width="stretch")
     
     with col_u2:
         st.markdown("### 👨‍⚕️ Radiologist Workload")
@@ -416,7 +429,7 @@ def render_live_simulation(settings: dict[str, Any]) -> None:
                 margin=dict(l=0, r=0, t=10, b=0),
                 legend=dict(orientation="h"),
             )
-            st.plotly_chart(fig_rad, use_container_width=True)
+            st.plotly_chart(fig_rad, width="stretch")
     
     # Removed auto-refresh loop (caused SIGSEGV on macOS with heavy Plotly renders)
     # Use the Step / Batch buttons above to advance the simulation.
@@ -502,7 +515,7 @@ uv run medimg-train --timesteps 100000 --seed 42
         height=350,
         legend=dict(orientation="h"),
     )
-    st.plotly_chart(fig_reward, use_container_width=True)
+    st.plotly_chart(fig_reward, width="stretch")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -526,7 +539,7 @@ def render_policy_comparison() -> None:
     st.markdown("#### Metrics Summary")
     st.dataframe(
         df.style.background_gradient(cmap="RdYlGn", axis=0),
-        use_container_width=True,
+        width="stretch",
     )
     
     # Visualization
@@ -542,7 +555,7 @@ def render_policy_comparison() -> None:
                 color_discrete_sequence=px.colors.qualitative.Set2,
             )
             fig.add_hline(y=30, line_dash="dot", annotation_text="Target: 30 min")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
         
         with col2:
             if "avg_emergency_tat_min" in df.columns:
@@ -553,7 +566,7 @@ def render_policy_comparison() -> None:
                     template="plotly_dark",
                     color_discrete_sequence=px.colors.qualitative.Set2,
                 )
-                st.plotly_chart(fig2, use_container_width=True)
+                st.plotly_chart(fig2, width="stretch")
     
     # Scanner utilization comparison
     if all(c in df.columns for c in ["ct_utilization", "mri_utilization", "xray_utilization"]):
@@ -579,7 +592,7 @@ def render_policy_comparison() -> None:
                 title="Scanner Utilization by Modality and Policy",
             )
             fig_util.add_hline(y=85, line_dash="dot", annotation_text="Target 85%")
-            st.plotly_chart(fig_util, use_container_width=True)
+            st.plotly_chart(fig_util, width="stretch")
     
     # Check for figure files
     figures_dir = Path("outputs/figures")
@@ -590,7 +603,7 @@ def render_policy_comparison() -> None:
             fig_cols = st.columns(min(3, len(png_files)))
             for i, fig_path in enumerate(png_files[:6]):
                 with fig_cols[i % 3]:
-                    st.image(str(fig_path), caption=fig_path.stem, use_container_width=True)
+                    st.image(str(fig_path), caption=fig_path.stem, width="stretch")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -678,7 +691,7 @@ def render_patient_timeline() -> None:
         )
         fig.update_xaxes(title_text="Simulation Time (minutes)")
         fig.update_layout(height=max(400, len(display) * 25))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     
     # Statistics
     col1, col2, col3 = st.columns(3)
@@ -748,7 +761,7 @@ def render_dataset_explorer() -> None:
         filtered = filtered[filtered["priority"].isin(priority_filter)]
     
     st.markdown(f"Showing {min(max_rows, len(filtered)):,} of {len(filtered):,} matching records")
-    st.dataframe(filtered.head(max_rows), use_container_width=True)
+    st.dataframe(filtered.head(max_rows), width="stretch")
     
     # Distribution charts
     st.markdown("---")
@@ -762,7 +775,7 @@ def render_dataset_explorer() -> None:
                 template="plotly_dark",
                 color_discrete_sequence=px.colors.qualitative.Set2,
             )
-            st.plotly_chart(fig_mod, use_container_width=True)
+            st.plotly_chart(fig_mod, width="stretch")
     
     with col_c2:
         if "wait_time" in df.columns:
@@ -775,7 +788,7 @@ def render_dataset_explorer() -> None:
                 template="plotly_dark",
                 color_discrete_sequence=px.colors.qualitative.Set2,
             )
-            st.plotly_chart(fig_wait, use_container_width=True)
+            st.plotly_chart(fig_wait, width="stretch")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

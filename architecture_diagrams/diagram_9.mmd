@@ -1,0 +1,28 @@
+sequenceDiagram
+    participant REG as Registration System
+    participant RIS as RIS (Order System)
+    participant SIS as Scheduling System
+    participant PACS as PACS / Scanner
+    participant RAD as Radiologist Workstation
+
+    Note over REG,RAD: Patient Arrives at Hospital
+
+    REG->>RIS: ADT^A01 (Admit/Visit Notify)
+    Note right of REG: MSH · PID · PV1 · EVN segments<br/>Patient demographics + visit info
+
+    RIS->>PACS: ORM^O01 (Imaging Order)
+    Note right of RIS: MSH · PID · ORC · OBR segments<br/>Modality, body part, priority, LOINC code
+
+    SIS->>PACS: SIU^S12 (Schedule Appointment)
+    Note right of SIS: SCH · PID · AIL · AIG segments<br/>Scanner ID, scheduled time, duration
+
+    PACS->>PACS: Perform Scan
+    Note over PACS: DICOM Study Generated<br/>Study UID · Series · SOP instances<br/>Acquisition parameters
+
+    PACS->>RAD: ORU^R01 (Report Result)
+    Note right of PACS: MSH · PID · OBR · OBX segments<br/>Report text, result_status='F' (Final)
+
+    RAD->>REG: ADT^A03 (Discharge)
+    Note right of RAD: MSH · PID · PV1 segments<br/>Discharge datetime
+
+    Note over REG,RAD: Encounter Complete → Metrics Recorded

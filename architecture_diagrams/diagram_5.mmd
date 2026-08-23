@@ -1,0 +1,121 @@
+classDiagram
+    class Config {
+        +SimulationConfig simulation
+        +ArrivalConfig arrivals
+        +ModalitiesConfig modalities
+        +RadiologistsConfig radiologists
+        +RLConfig rl
+        +DatasetConfig dataset
+        +AnalyticsConfig analytics
+        +load_config() Config
+    }
+
+    class Patient {
+        +str patient_id
+        +str mrn
+        +Priority priority
+        +Modality modality
+        +str body_part
+        +int age
+        +float arrival_time
+        +float scan_start_time
+        +PatientStatus status
+        +DICOMStudy dicom_study
+        +list hl7_messages
+        +wait_time() float
+        +scan_duration() float
+        +total_turnaround() float
+        +to_dict() dict
+    }
+
+    class HL7Message {
+        +HL7MessageType message_type
+        +str message_control_id
+        +str patient_id
+        +float timestamp
+        +dict segments
+        +create() HL7Message
+        +to_dict() dict
+    }
+
+    class DICOMStudy {
+        +str study_instance_uid
+        +Modality modality
+        +str body_part
+        +str manufacturer
+        +int number_of_series
+        +int number_of_images
+        +dict acquisition_params
+        +to_dict() dict
+    }
+
+    class HospitalSimulation {
+        +Config config
+        +simpy.Environment env
+        +dict patients
+        +dict scanners
+        +dict radiologists
+        +SimulationStats stats
+        +reset()
+        +run(duration) SimulationStats
+        +run_until(until)
+        +get_snapshot() SimulationSnapshot
+        +scanner_utilizations() dict
+        +radiologist_workloads() dict
+    }
+
+    class SimulationStats {
+        +list wait_times
+        +list scan_durations
+        +list total_turnarounds
+        +list emergency_turnarounds
+        +dict modality_throughput
+        +int n_arrived
+        +int n_completed
+        +record_patient_complete(patient)
+        +summary(duration) dict
+    }
+
+    class MedicalImagingEnv {
+        +Box observation_space
+        +Discrete action_space
+        +reset() tuple
+        +step(action) tuple
+        +render()
+        +close()
+    }
+
+    class MetricsComputer {
+        +compute(policy, stats, ...) PolicyMetrics
+        +compare(metrics_list) DataFrame
+        +_gini_coefficient(loads) float
+    }
+
+    class PolicyMetrics {
+        +str policy_name
+        +float avg_wait_time_min
+        +float p95_wait_time_min
+        +float throughput_per_hour
+        +float avg_scanner_utilization
+        +float workload_gini
+        +float avg_emergency_tat_min
+    }
+
+    class SyntheticDataGenerator {
+        +Config config
+        +generate(n_patients) dict
+        +_generate_encounters() tuple
+        +_generate_arrival_times() ndarray
+        +_sample_queue_wait() float
+        +_sample_scan_duration() float
+    }
+
+    Patient "1" --> "1" DICOMStudy
+    Patient "1" --> "5" HL7Message
+    HospitalSimulation "1" --> "1" SimulationStats
+    HospitalSimulation "1" --> "*" Patient
+    MedicalImagingEnv "1" --> "1" HospitalSimulation
+    MetricsComputer --> PolicyMetrics
+    Config --> HospitalSimulation
+    Config --> SyntheticDataGenerator
+    Config --> MedicalImagingEnv

@@ -1,0 +1,89 @@
+graph TB
+    subgraph INPUT["📥 Inputs"]
+        YAML["config/default.yaml\nPydantic Config"]
+        CLI["CLI Entry Points\nmedimg-*"]
+    end
+
+    subgraph DATAGEN["📊 Data Generation Layer"]
+        GEN["SyntheticDataGenerator\n100k+ Encounters"]
+        HL7G["HL7EventGenerator\nADT · ORM · SIU · ORU"]
+        DICOMG["DICOMMetadataGenerator\nCT · MRI · XRAY Params"]
+    end
+
+    subgraph SIMCORE["🏥 Simulation Core  (SimPy DES)"]
+        HOSP["HospitalSimulation\nSimPy Environment"]
+        ARRIVE["Patient Arrival\nPoisson + Diurnal"]
+        PATHWAY["Patient Pathway Process\nRegistration → Queue → Scan → Report"]
+        QUEUE["Priority Queues\nCT · MRI · XRAY · Emergency"]
+        SCAN["Scanner Resources\nPriorityResource × 9"]
+        REPORT["Radiologist Report Queue\n7 Radiologists, Specialty-matched"]
+        STATS["SimulationStats\nWait-times · TAT · Utilization"]
+    end
+
+    subgraph POLICIES["🎯 Scheduling Policies"]
+        FIFO["FIFOPolicy\nFirst-In-First-Out"]
+        PRI["PriorityTriagePolicy\nEmergency > Urgent > Routine"]
+        PPO_POL["PPOPolicy\nML-learned Dispatch"]
+    end
+
+    subgraph RLENV["🤖 RL Environment (Gymnasium)"]
+        ENV["MedicalImagingEnv\ngym.Env wrapper"]
+        OBS["Observation Space\n21-dim float32 vector"]
+        ACT["Action Space\nDiscrete(3)"]
+        REW["Reward Function\nWait · TAT · Utilization · Imbalance"]
+    end
+
+    subgraph TRAINING["🧠 RL Training (SB3 PPO)"]
+        TRAINER["PPOTrainer\nStable-Baselines3"]
+        CALLBACK["KPILoggingCallback\nTensorBoard KPIs"]
+        MODEL["PPO Model\n.zip checkpoint"]
+    end
+
+    subgraph ANALYTICS["📈 Analytics & Reporting"]
+        METRICS["MetricsComputer\nKPIs · Gini · Percentiles"]
+        PMETS["PolicyMetrics\nComparison Dataclass"]
+        REPORT_GEN["ReportGenerator\nPlots · HTML · PDF"]
+    end
+
+    subgraph OUTPUTS["📤 Outputs"]
+        PARQUET["Parquet Files\npatients · hl7 · dicom"]
+        FIGS["Publication Figures\nPNG · PDF"]
+        TB["TensorBoard Logs"]
+        DASH["Streamlit Dashboard\n5-Tab Live View"]
+    end
+
+    YAML --> HOSP
+    YAML --> GEN
+    CLI --> GEN
+    CLI --> HOSP
+    CLI --> TRAINER
+    CLI --> DASH
+
+    GEN --> HL7G
+    GEN --> DICOMG
+    GEN --> PARQUET
+
+    HOSP --> ARRIVE --> PATHWAY
+    PATHWAY --> QUEUE
+    QUEUE --> SCAN
+    SCAN --> REPORT
+    REPORT --> STATS
+
+    FIFO --> HOSP
+    PRI --> HOSP
+    PPO_POL --> HOSP
+
+    HOSP --> ENV
+    ENV --> OBS
+    ENV --> ACT
+    ENV --> REW
+
+    ENV --> TRAINER
+    TRAINER --> CALLBACK --> TB
+    TRAINER --> MODEL
+    MODEL --> PPO_POL
+
+    STATS --> METRICS --> PMETS
+    PMETS --> REPORT_GEN --> FIGS
+    ENV --> DASH
+    STATS --> DASH

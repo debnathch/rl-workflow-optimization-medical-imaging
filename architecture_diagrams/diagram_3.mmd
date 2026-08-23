@@ -1,0 +1,42 @@
+sequenceDiagram
+    participant PPO as PPO Agent<br/>(SB3)
+    participant ENV as MedicalImagingEnv<br/>(Gymnasium)
+    participant SIM as HospitalSimulation<br/>(SimPy)
+    participant CB as KPILoggingCallback
+    participant TB as TensorBoard
+
+    PPO->>ENV: reset(seed=42)
+    ENV->>SIM: HospitalSimulation(config, policy, seed)
+    SIM->>SIM: reset() — init env at t=360min (6AM)
+    SIM->>SIM: start _patient_arrival_generator()
+    SIM->>SIM: start _stats_collector()
+    ENV-->>PPO: obs[21], info{}
+
+    loop Every Decision Epoch (5 min)
+        PPO->>ENV: step(action ∈ {0,1,2})
+        Note over ENV: action=0: FIFO<br/>action=1: Priority<br/>action=2: Emergency-first
+        ENV->>SIM: _apply_action(action)
+        ENV->>SIM: run_until(now + 5min)
+        SIM->>SIM: Process arrivals, scans, reports
+        SIM-->>ENV: SimulationSnapshot
+        ENV->>ENV: _compute_reward()
+        Note over ENV: reward = -α·wait_time<br/>- β·emergency_TAT<br/>+ γ·utilization<br/>- δ·imbalance
+        ENV-->>PPO: obs[21], reward, terminated, truncated, info
+
+        PPO->>PPO: Store in rollout buffer
+    end
+
+    Note over PPO: Every 2048 steps → Update policy
+    PPO->>CB: on_step()
+    CB->>TB: Log avg_wait_time, avg_emergency_tat
+    CB->>PPO: check eval_freq
+    PPO->>ENV: evaluate_policy(n_episodes=5)
+    ENV-->>PPO: mean_reward, std_reward
+
+    loop Full Training (500k steps)
+        PPO->>PPO: policy_gradient_update
+        PPO->>PPO: value_function_update
+        PPO->>PPO: entropy_regularization
+    end
+
+    PPO->>PPO: save("best_model.zip")

@@ -132,15 +132,28 @@ class MedicalImagingEnv(gym.Env):
         """
         super().reset(seed=seed)
 
-        effective_seed = seed if seed is not None else self._seed
-        if effective_seed is None:
-            effective_seed = int(self.np_random.integers(0, 2**31 - 1))
+        # ── Episode seed: ALWAYS generate a fresh seed from np_random ──────────
+        # This is the root cause of explained_variance=0: if we re-use the same
+        # seed (config.simulation.seed=42) for every episode, every episode
+        # produces identical patient arrivals → identical rewards regardless of
+        # action → PPO value function can't learn.
+        #
+        # Gymnasium's super().reset(seed=seed) already seeds self.np_random
+        # properly. We just draw from it to get a unique per-episode seed.
+        effective_seed = int(self.np_random.integers(0, 2**31 - 1))
+
+        # Create a mutable adaptive policy that _apply_action can switch
+        from medimg_twin.simulation.policies import FIFOPolicy
+        adaptive_policy = FIFOPolicy()  # default to FIFO; _apply_action switches it
+        adaptive_policy.name = "fifo"   # type: ignore[attr-defined]
 
         self._sim = HospitalSimulation(
             config=self.config,
+            policy=adaptive_policy,
             seed=effective_seed,
         )
         self._sim.reset()
+        self._adaptive_policy = adaptive_policy  # keep reference for _apply_action
 
         # Start the simulation processes
         sim_duration = self.config.simulation.duration_minutes
@@ -149,6 +162,7 @@ class MedicalImagingEnv(gym.Env):
 
         self._step_count = 0
         self._episode_reward = 0.0
+        self._last_action = 0
 
         obs = self._get_observation()
         self._current_obs = obs
@@ -201,14 +215,11 @@ class MedicalImagingEnv(gym.Env):
 
         return obs, reward, terminated, truncated, info
 
-    def render(self, mode: str = "dict") -> dict[str, Any] | str | None:
+    def render(self) -> Any:
         """Render current simulation state.
 
-        Args:
-            mode: Render mode. 'dict' returns state dict; 'human' prints it.
-
         Returns:
-            State dict (mode='dict'), None otherwise.
+            State dict (render_mode='dict'), None otherwise.
         """
         if self._sim is None:
             return None
@@ -235,7 +246,7 @@ class MedicalImagingEnv(gym.Env):
             ),
             "episode_reward": self._episode_reward,
         }
-        if mode == "human":
+        if getattr(self, "render_mode", None) == "human":
             for k, v in state.items():
                 print(f"  {k}: {v}")
         return state
@@ -250,16 +261,27 @@ class MedicalImagingEnv(gym.Env):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _apply_action(self, action: int) -> None:
-        """Apply the chosen action to influence the simulation's dispatch order.
+        """Apply the chosen action by switching the simulation's active scheduling policy.
 
-        The action modifies the effective priority ordering of waiting patients
-        so the SimPy resource queues process them in the desired sequence.
+        Action mapping:
+            0 → FIFO (arrival-time ordering, baseline)
+            1 → Priority triage (Emergency=0, Urgent=1, Routine=2)
+            2 → Emergency-first aggressive (Emergency=-1, Urgent=1, Routine=2)
         """
-        # The hospital simulation uses SimPy PriorityResource via the -priority arg.
-        # Here the action influences which patients get elevated priority flags.
-        # This is a soft advisory — the main effect is through reward shaping.
-        # In a full integration, we'd directly manipulate the simpy queue ordering.
-        pass  # Actions handled at scheduling layer; reward shapes behaviour
+        if self._sim is None:
+            return
+
+        # Mutate the adaptive policy object that was passed to HospitalSimulation
+        # _patient_pathway reads policy.name on every patient arrival
+        if hasattr(self, '_adaptive_policy'):
+            if action == 0:
+                self._adaptive_policy.name = "fifo"
+            elif action == 1:
+                self._adaptive_policy.name = "priority"
+            elif action == 2:
+                self._adaptive_policy.name = "ppo"  # emergency-first branch
+
+        self._last_action = action
 
     def _get_observation(self) -> np.ndarray:
         """Build normalized observation vector from simulation snapshot."""
@@ -296,52 +318,53 @@ class MedicalImagingEnv(gym.Env):
         return obs
 
     def _compute_reward(self) -> float:
-        """Compute reward signal from current simulation state.
+        """Compute reward from the CURRENT snapshot — not lagged history averages.
 
-        Reward is a negative weighted sum of penalty terms. The agent
-        learns to minimize wait times, emergency delays, and workload
-        imbalance while maximizing scanner utilization and throughput.
+        Key insight: stats.wait_times[-20:] barely changes within a 5-minute epoch,
+        making the reward look identical regardless of action → value function can't learn.
+
+        Instead, use SNAPSHOT quantities that respond immediately when policy switches:
+        - emergency_queue_length: drops fast when Priority/Emergency-first is active
+        - completed_last_epoch: jumps when throughput increases
+        - ct/mri/xray_queue_length: direct queue signal
+
+        Reward is in [-5, 1] range so PPO value function can maintain explained_variance > 0.5.
 
         Returns:
-            Scalar reward (typically in range [-10, 0]).
+            Scalar reward in [-5, 1].
         """
         if self._sim is None:
             return 0.0
 
-        weights = self.config.rl.reward_weights
-        stats = self._sim.stats
         snapshot = self._sim.get_snapshot()
+        stats = self._sim.stats
 
-        # 1. Average wait time penalty (normalized to minutes)
-        avg_wait = float(np.mean(stats.wait_times[-20:])) if stats.wait_times else 0.0
-        wait_penalty = (avg_wait / MAX_WAIT_TIME) * weights.avg_wait_time
+        # ── Primary signal: emergency queue length (immediate, action-responsive) ──
+        # Emergency patients waiting = highest urgency signal
+        emg_q = snapshot.emergency_queue_length
+        emg_q_pen = min(emg_q / 3.0, 1.0) * 3.0   # 3+ emergencies waiting = full penalty
 
-        # 2. Emergency turnaround penalty
-        avg_emg_tat = (
-            float(np.mean(stats.emergency_turnarounds[-10:]))
-            if stats.emergency_turnarounds else 0.0
-        )
-        emg_penalty = (avg_emg_tat / (MAX_WAIT_TIME * 2.0)) * weights.emergency_tat
+        # ── Secondary: total queue length (builds when throughput lags) ──
+        total_q = (snapshot.ct_queue_length + snapshot.mri_queue_length
+                   + snapshot.xray_queue_length + snapshot.emergency_queue_length)
+        total_q_pen = min(total_q / 15.0, 1.0) * 1.5
 
-        # 3. Scanner utilization reward (reward for being close to target)
-        target = weights.utilization_target
-        avg_util = (snapshot.ct_utilization + snapshot.mri_utilization + snapshot.xray_utilization) / 3.0
-        util_penalty = abs(avg_util - target) * weights.scanner_utilization
+        # ── Tertiary: worst-case wait from recent history ──
+        # Use last 5 patients only (not 20) for faster response
+        recent_wait = (float(np.mean(stats.wait_times[-5:])) if stats.wait_times else 0.0)
+        wait_pen = min(recent_wait / 60.0, 1.0) * 0.5
 
-        # 4. Workload imbalance penalty
-        workloads = [w for w in snapshot.radiologist_workloads if w > 0]
-        imbalance = float(np.std(workloads)) if len(workloads) > 1 else 0.0
-        imbalance_penalty = imbalance * weights.workload_imbalance
+        # ── Throughput bonus: patients completed this epoch ──
+        throughput_bonus = min(snapshot.completed_last_epoch / 5.0, 1.0) * 1.0
 
-        # 5. Throughput reward (bonus for completions)
-        throughput_reward = (
-            min(snapshot.completed_last_epoch / 10.0, 1.0) * weights.throughput
-        )
+        # ── Utilization bonus: reward scanners being busy ──
+        avg_util = (snapshot.ct_utilization + snapshot.mri_utilization
+                    + snapshot.xray_utilization) / 3.0
+        util_bonus = avg_util * 0.3   # [0, 0.3]
 
-        reward = -(wait_penalty + emg_penalty + util_penalty + imbalance_penalty)
-        reward += throughput_reward
+        reward = -(emg_q_pen + total_q_pen + wait_pen) + throughput_bonus + util_bonus
 
-        return float(np.clip(reward, -20.0, 5.0))
+        return float(np.clip(reward, -6.0, 2.0))
 
     def _get_info(self) -> dict[str, Any]:
         """Build info dict for diagnostics."""

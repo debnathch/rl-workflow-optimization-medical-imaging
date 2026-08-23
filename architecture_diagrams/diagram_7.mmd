@@ -1,0 +1,49 @@
+graph LR
+    subgraph USER["👤 Researcher / Clinician"]
+        direction TB
+        CLI_GEN["medimg-generate\n--n-patients 100000"]
+        CLI_EXP["medimg-experiment\n--duration 480 --runs 5"]
+        CLI_TRN["medimg-train\n--timesteps 500000"]
+        CLI_REP["medimg-report\n--input outputs/"]
+        CLI_DASH["medimg-dashboard\nStreamlit :8501"]
+    end
+
+    subgraph SCRIPTS["🖥️ Scripts Layer"]
+        S1["generate_dataset.py\nTyper app"]
+        S2["run_experiment.py\nTyper app"]
+        S3["train_agent.py\nTyper app"]
+        S4["reporting_script.py\nTyper app"]
+        S5["dashboard.py\nStreamlit app"]
+    end
+
+    subgraph CORE["⚙️ Core Engine"]
+        C1["SyntheticDataGenerator"]
+        C2["HospitalSimulation\n+ Policies"]
+        C3["MedicalImagingEnv\n+ PPOTrainer"]
+        C4["MetricsComputer\n+ ReportGenerator"]
+        C5["Streamlit Dashboard\n5 Tabs"]
+    end
+
+    subgraph STORE["💾 Storage"]
+        F1["outputs/dataset/\n*.parquet + metadata.json"]
+        F2["outputs/experiments/\nresults.json + comparison.csv"]
+        F3["outputs/training/\nbest_model.zip + tensorboard/"]
+        F4["outputs/figures/\n*.png + *.pdf"]
+        F5["outputs/analytics/\nreport.html"]
+    end
+
+    CLI_GEN --> S1 --> C1 --> F1
+    CLI_EXP --> S2 --> C2 --> F2
+    CLI_TRN --> S3 --> C3 --> F3
+    CLI_REP --> S4 --> C4 --> F4
+    CLI_DASH --> S5 --> C5
+
+    F1 -.->|Loads dataset| C5
+    F2 -.->|Loads results| C5
+    F3 -.->|Loads model| C2
+    C5 --> F5
+
+    style USER fill:#E3F2FD,stroke:#1565C0
+    style SCRIPTS fill:#E8F5E9,stroke:#2E7D32
+    style CORE fill:#FFF3E0,stroke:#E65100
+    style STORE fill:#FCE4EC,stroke:#880E4F
