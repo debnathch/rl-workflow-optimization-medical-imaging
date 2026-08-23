@@ -4,7 +4,7 @@ Policies:
 1. FIFO — First-In-First-Out baseline.
 2. PriorityTriage — fixed clinical priority heuristic.
 3. PPOPolicy — trained Stable-Baselines3 PPO model.
-4. ActionSchedulingPolicy — applies the action selected by the RL environment.
+4. ActionSchedulingPolicy — applies an already-selected RL action.
 
 AdaptivePPOPolicy remains available as a deterministic diagnostic reference,
 but is not used by the research benchmark.
@@ -26,8 +26,40 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class _TrainingActionModel:
+    """Tiny adapter used only by the Gym training environment.
+
+    HospitalSimulation historically re-queried ``policy.model.predict`` when a
+    policy was named ``ppo``. During PPO training the environment intentionally
+    supplies a selected action, so this adapter makes that action the single
+    source of truth instead of falling back to Priority scheduling.
+    """
+
+    def __init__(self, owner: "FIFOPolicy") -> None:
+        self.owner = owner
+
+    def predict(self, _obs, deterministic: bool = True):
+        return np.asarray(self.owner._training_action, dtype=np.int64), None
+
+
 class FIFOPolicy:
-    name: str = "fifo"
+    """FIFO baseline plus a compatibility adapter for RL environment actions."""
+
+    def __init__(self) -> None:
+        self._name = "fifo"
+        self._training_action = 0
+        self.model = _TrainingActionModel(self)
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @name.setter
+    def name(self, value: str) -> None:
+        self._name = value
+        # The RL environment uses this existing compatibility object to pass
+        # its selected action into HospitalSimulation without a second PPO call.
+        self._training_action = {"fifo": 0, "priority": 1, "ppo": 2}.get(value, 0)
 
     def __call__(self, sim: "HospitalSimulation") -> str | None:
         waiting = [p for p in sim.patients.values() if p.status == PatientStatus.WAITING_SCAN]
@@ -47,13 +79,7 @@ class PriorityTriagePolicy:
 
 
 class ActionSchedulingPolicy:
-    """Apply an already-selected RL action to the simulation.
-
-    This class is deliberately not a learned policy. It is the adapter between
-    Gymnasium's action space and the SimPy scheduler. It prevents the previous
-    bug where the environment's chosen action was ignored and the simulation
-    attempted to call a PPO model a second time.
-    """
+    """Apply an already-selected RL action to the simulation."""
 
     name: str = "rl_action"
 
